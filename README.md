@@ -1,4 +1,3 @@
-Here’s a creative `README.md` for your chemistry code and solutions repository. You can modify it as needed:
 
 ---
 
