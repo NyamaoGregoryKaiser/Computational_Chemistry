@@ -17,17 +17,17 @@ y = linspace(0, Ly, Ny); % y-coordinates
 [X, Y] = meshgrid(x, y); % Grid
 
 % Model parameters
-M_u = 1.0;               % Mobility coefficient for u
-M_n = 1.0;               % Mobility coefficient for n
+M_tumor = 1.0;           % Mobility coefficient for tumor cells
+M_nutrient = 1.0;        % Mobility coefficient for nutrient
 E = 0.01;                % Surface tension coefficient
-D = 0.5;                 % Diffusion coefficient
-gamma = 0.1;             % Reaction/source term coefficient
-chi_u = 0.5;             % Chemotaxis coefficient
+D_nutrient = 0.5;        % Nutrient diffusion coefficient
+consume_rate = 0.1;      % Rate at which tumor cells consume nutrients
+chi = 0.5;               % Chemotaxis coefficient (tumor attraction to nutrient)
 sigma = 1.0;             % Parameter in chemical potential
-P0 = 1.0;                % Base proliferation rate
-dP0 = 0.2;               % Proliferation rate modifier
-mu_n = 1.0;              % Chemical potential parameter for n
-mu_u = 0.5;              % Chemical potential parameter for u
+P_base = 1.0;            % Base proliferation rate
+P_mod = 0.2;             % Proliferation rate modifier
+mu_nutrient = 1.0;       % Chemical potential parameter for nutrient
+mu_tumor = 0.5;          % Chemical potential parameter for tumor
 
 % Simulation parameters
 t_final = 10.0;          % Final time
@@ -39,9 +39,9 @@ safety_factor = 0.8;     % Safety factor for time step adjustment
 plot_interval = 20;      % Plot every n steps
 
 %% Initial conditions
-% Initialize u with a Gaussian pulse at the center
-u = zeros(Ny, Nx);
-n = ones(Ny, Nx);        % Initial nutrient distribution (uniform)
+% Initialize tumor with a Gaussian pulse at the center
+tumor_density = zeros(Ny, Nx);
+nutrient_conc = ones(Ny, Nx);   % Initial nutrient distribution (uniform)
 
 % Create a tumor seed in the center
 center_x = Lx/2;
@@ -50,13 +50,13 @@ radius = min(Lx, Ly)/10;
 for i = 1:Ny
     for j = 1:Nx
         dist = sqrt((x(j) - center_x)^2 + (y(i) - center_y)^2);
-        u(i,j) = exp(-dist^2/(radius^2));
+        tumor_density(i,j) = exp(-dist^2/(radius^2));
     end
 end
 
 % Setup for free energy functional
 f = @(u) 0.25*u.^2.*(1-u).^2;  % Double-well potential
-df_du = @(u) 0.5*u.*(1-u).*(1-2*u);  % Derivative of the free energy w.r.t. u
+df_du = @(u) 0.5*u.*(1-u).*(1-2*u);  % Derivative of the free energy w.r.t. tumor density
 
 %% Setup arrays for storing results
 t = 0;
@@ -65,8 +65,8 @@ dt = dt_init;
 
 % Create figures for visualization
 figure(1); clf;
-h_u = subplot(1,2,1);
-h_n = subplot(1,2,2);
+h_tumor = subplot(1,2,1);
+h_nutrient = subplot(1,2,2);
 colormap(jet);
 
 % For recording the evolution of dt
@@ -76,14 +76,14 @@ t_history = [];
 %% Main time loop
 while t < t_final
     % Store previous solution for error estimation
-    u_old = u;
-    n_old = n;
+    tumor_old = tumor_density;
+    nutrient_old = nutrient_conc;
     
     % Calculate spatial derivatives using finite differences
     % Implement periodic boundary conditions
     
-    % Laplacian of u - ∇²u
-    laplacian_u = zeros(size(u));
+    % Laplacian of tumor_density - ∇²tumor_density
+    laplacian_tumor = zeros(size(tumor_density));
     for i = 1:Ny
         im1 = mod(i-2,Ny) + 1; % i-1 with periodic boundary
         ip1 = mod(i,Ny) + 1;   % i+1 with periodic boundary
@@ -93,18 +93,20 @@ while t < t_final
             jp1 = mod(j,Nx) + 1;   % j+1 with periodic boundary
             
             % 5-point stencil for Laplacian
-            laplacian_u(i,j) = (u(im1,j) + u(ip1,j) + u(i,jm1) + u(i,jp1) - 4*u(i,j))/(dx^2);
+            laplacian_tumor(i,j) = (tumor_density(im1,j) + tumor_density(ip1,j) + ...
+                               tumor_density(i,jm1) + tumor_density(i,jp1) - ...
+                               4*tumor_density(i,j))/(dx^2);
         end
     end
     
-    % Compute df/du
-    dfdu = df_du(u);
+    % Compute df/du - derivative of free energy with respect to tumor density
+    dfdu = df_du(tumor_density);
     
-    % Compute chemical potential term for u
-    mu = dfdu - E * laplacian_u - D * (-chi_u * n);
+    % Compute chemical potential term for tumor
+    chem_pot_tumor = dfdu - E * laplacian_tumor - D_nutrient * (-chi * nutrient_conc);
     
-    % Compute ∇(M_u * ∇(df/du - E∇²u + D·(-χ_u·n)))
-    flux_u = zeros(size(u));
+    % Compute ∇(M_tumor * ∇(df/du - E∇²tumor + D·(-χ·nutrient)))
+    flux_tumor = zeros(size(tumor_density));
     for i = 1:Ny
         im1 = mod(i-2,Ny) + 1;
         ip1 = mod(i,Ny) + 1;
@@ -113,25 +115,25 @@ while t < t_final
             jm1 = mod(j-2,Nx) + 1;
             jp1 = mod(j,Nx) + 1;
             
-            % Calculate gradient of mu using central differences
-            dmu_dx = (mu(i,jp1) - mu(i,jm1))/(2*dx);
-            dmu_dy = (mu(ip1,j) - mu(im1,j))/(2*dy);
+            % Calculate gradient of chemical potential using central differences
+            dmu_dx = (chem_pot_tumor(i,jp1) - chem_pot_tumor(i,jm1))/(2*dx);
+            dmu_dy = (chem_pot_tumor(ip1,j) - chem_pot_tumor(im1,j))/(2*dy);
             
-            % Calculate divergence of M_u * gradient of mu
-            flux_x_right = M_u * (mu(i,jp1) - mu(i,j))/dx;
-            flux_x_left = M_u * (mu(i,j) - mu(i,jm1))/dx;
-            flux_y_down = M_u * (mu(ip1,j) - mu(i,j))/dy;
-            flux_y_up = M_u * (mu(i,j) - mu(im1,j))/dy;
+            % Calculate divergence of M_tumor * gradient of chemical potential
+            flux_x_right = M_tumor * (chem_pot_tumor(i,jp1) - chem_pot_tumor(i,j))/dx;
+            flux_x_left = M_tumor * (chem_pot_tumor(i,j) - chem_pot_tumor(i,jm1))/dx;
+            flux_y_down = M_tumor * (chem_pot_tumor(ip1,j) - chem_pot_tumor(i,j))/dy;
+            flux_y_up = M_tumor * (chem_pot_tumor(i,j) - chem_pot_tumor(im1,j))/dy;
             
-            flux_u(i,j) = (flux_x_right - flux_x_left)/dx + (flux_y_down - flux_y_up)/dy;
+            flux_tumor(i,j) = (flux_x_right - flux_x_left)/dx + (flux_y_down - flux_y_up)/dy;
         end
     end
     
-    % Similar computations for n
-    % Calculate D*(-chi_u * n) + n/sigma term
-    n_term = D*(-chi_u * n) + n/sigma;
+    % Similar computations for nutrient
+    % Calculate D_nutrient*(-chi * nutrient) + nutrient/sigma term
+    nutrient_term = D_nutrient*(-chi * nutrient_conc) + nutrient_conc/sigma;
     
-    flux_n = zeros(size(n));
+    flux_nutrient = zeros(size(nutrient_conc));
     for i = 1:Ny
         im1 = mod(i-2,Ny) + 1;
         ip1 = mod(i,Ny) + 1;
@@ -140,35 +142,35 @@ while t < t_final
             jm1 = mod(j-2,Nx) + 1;
             jp1 = mod(j,Nx) + 1;
             
-            % Calculate gradient of n_term using central differences
-            dn_term_dx = (n_term(i,jp1) - n_term(i,jm1))/(2*dx);
-            dn_term_dy = (n_term(ip1,j) - n_term(im1,j))/(2*dy);
+            % Calculate gradient of nutrient_term using central differences
+            dn_term_dx = (nutrient_term(i,jp1) - nutrient_term(i,jm1))/(2*dx);
+            dn_term_dy = (nutrient_term(ip1,j) - nutrient_term(im1,j))/(2*dy);
             
-            % Calculate divergence of M_n * gradient of n_term
-            flux_x_right = M_n * (n_term(i,jp1) - n_term(i,j))/dx;
-            flux_x_left = M_n * (n_term(i,j) - n_term(i,jm1))/dx;
-            flux_y_down = M_n * (n_term(ip1,j) - n_term(i,j))/dy;
-            flux_y_up = M_n * (n_term(i,j) - n_term(im1,j))/dy;
+            % Calculate divergence of M_nutrient * gradient of nutrient_term
+            flux_x_right = M_nutrient * (nutrient_term(i,jp1) - nutrient_term(i,j))/dx;
+            flux_x_left = M_nutrient * (nutrient_term(i,j) - nutrient_term(i,jm1))/dx;
+            flux_y_down = M_nutrient * (nutrient_term(ip1,j) - nutrient_term(i,j))/dy;
+            flux_y_up = M_nutrient * (nutrient_term(i,j) - nutrient_term(im1,j))/dy;
             
-            flux_n(i,j) = (flux_x_right - flux_x_left)/dx + (flux_y_down - flux_y_up)/dy;
+            flux_nutrient(i,j) = (flux_x_right - flux_x_left)/dx + (flux_y_down - flux_y_up)/dy;
         end
     end
     
-    % Calculate delta_u (growth term)
-    delta_u = P0 * u .* sigma .* (mu_n - mu_u);
+    % Calculate growth term (proliferation rate)
+    proliferation = P_base * tumor_density .* sigma .* (mu_nutrient - mu_tumor);
     
     % Update equations using forward Euler method
-    u_new = u + dt * (flux_u + gamma * u + delta_u);
-    n_new = n + dt * (flux_n - gamma * u);
+    tumor_new = tumor_density + dt * (flux_tumor + consume_rate * tumor_density + proliferation);
+    nutrient_new = nutrient_conc + dt * (flux_nutrient - consume_rate * tumor_density);
     
     % Ensure physical bounds
-    u_new = max(0, min(1, u_new));  % Ensure u is between 0 and 1
-    n_new = max(0, n_new);          % Ensure n is non-negative
+    tumor_new = max(0, min(1, tumor_new));  % Ensure tumor density is between 0 and 1
+    nutrient_new = max(0, nutrient_new);    % Ensure nutrient concentration is non-negative
     
     % Error estimation for adaptive time stepping
-    error_u = norm(u_new - u_old, 'fro') / norm(u_old + eps, 'fro');
-    error_n = norm(n_new - n_old, 'fro') / norm(n_old + eps, 'fro');
-    error = max(error_u, error_n);
+    error_tumor = norm(tumor_new - tumor_old, 'fro') / norm(tumor_old + eps, 'fro');
+    error_nutrient = norm(nutrient_new - nutrient_old, 'fro') / norm(nutrient_old + eps, 'fro');
+    error = max(error_tumor, error_nutrient);
     
     % Adjust time step based on error
     if error > tol
@@ -183,8 +185,8 @@ while t < t_final
         end
     else
         % Accept step and update solution
-        u = u_new;
-        n = n_new;
+        tumor_density = tumor_new;
+        nutrient_conc = nutrient_new;
         t = t + dt;
         step = step + 1;
         
@@ -200,17 +202,17 @@ while t < t_final
         if mod(step, plot_interval) == 0
             fprintf('Step %d: t = %f, dt = %e\n', step, t, dt);
             
-            % Plot u
-            subplot(h_u);
-            imagesc(x, y, u);
-            title(sprintf('Tumor Density (u) at t = %.3f', t));
+            % Plot tumor density
+            subplot(h_tumor);
+            imagesc(x, y, tumor_density);
+            title(sprintf('Tumor Density at t = %.3f', t));
             axis equal tight;
             colorbar;
             
-            % Plot n
-            subplot(h_n);
-            imagesc(x, y, n);
-            title(sprintf('Nutrient Concentration (n) at t = %.3f', t));
+            % Plot nutrient concentration
+            subplot(h_nutrient);
+            imagesc(x, y, nutrient_conc);
+            title(sprintf('Nutrient Concentration at t = %.3f', t));
             axis equal tight;
             colorbar;
             
@@ -227,14 +229,14 @@ end
 %% Final visualization
 figure(2);
 subplot(2,2,1);
-imagesc(x, y, u);
-title('Final Tumor Density (u)');
+imagesc(x, y, tumor_density);
+title('Final Tumor Density');
 axis equal tight;
 colorbar;
 
 subplot(2,2,2);
-imagesc(x, y, n);
-title('Final Nutrient Concentration (n)');
+imagesc(x, y, nutrient_conc);
+title('Final Nutrient Concentration');
 axis equal tight;
 colorbar;
 
@@ -247,7 +249,7 @@ set(gca, 'YScale', 'log');
 
 % For a 3D visualization of tumor
 subplot(2,2,4);
-surf(X, Y, u, 'EdgeColor', 'none');
+surf(X, Y, tumor_density, 'EdgeColor', 'none');
 title('3D Visualization of Tumor');
 xlabel('x');
 ylabel('y');
